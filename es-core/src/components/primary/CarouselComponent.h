@@ -542,10 +542,18 @@ template <typename T> void CarouselComponent<T>::onDemandTextureLoad()
              i < center + itemInclusion + itemInclusionAfter; ++i) {
             int cursor {i};
 
-            while (cursor < 0)
-                cursor += numEntries;
-            while (cursor >= numEntries)
-                cursor -= numEntries;
+            // Custom patch: mirror the render() behavior, don't wrap around to preload
+            // textures for duplicate entries when looping is disabled.
+            if (mLoopType == ListLoopType::LIST_NEVER_LOOP) {
+                if (cursor < 0 || cursor >= numEntries)
+                    continue;
+            }
+            else {
+                while (cursor < 0)
+                    cursor += numEntries;
+                while (cursor >= numEntries)
+                    cursor -= numEntries;
+            }
 
             auto& entry = mEntries.at(cursor);
 
@@ -902,10 +910,18 @@ template <typename T> void CarouselComponent<T>::render(const glm::mat4& parentT
          i < center + itemInclusion + itemInclusionAfter; ++i) {
         int index {i};
 
-        while (index < 0)
-            index += numEntries;
-        while (index >= numEntries)
-            index -= numEntries;
+        // Custom patch: when looping is disabled, don't wrap slot indices around to fill
+        // the visible window with duplicate entries. Instead simply leave those slots empty.
+        if (mLoopType == ListLoopType::LIST_NEVER_LOOP) {
+            if (index < 0 || index >= numEntries)
+                continue;
+        }
+        else {
+            while (index < 0)
+                index += numEntries;
+            while (index >= numEntries)
+                index -= numEntries;
+        }
 
         float distance {i - camOffset};
 
