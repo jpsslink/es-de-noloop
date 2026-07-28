@@ -901,6 +901,12 @@ template <typename T> void CarouselComponent<T>::render(const glm::mat4& parentT
         float saturation;
         float dimming;
         glm::mat4 trans;
+        // Custom patch: marks a slot that has no corresponding entry (only possible when
+        // looping is disabled and there are fewer entries than visible slots). Kept in the
+        // vector rather than omitted so that the stacking/z-order logic below (which relies
+        // on renderItems.size() and positional math like belowCenter) still sees the full,
+        // predictable window size. Skipped at actual draw time instead.
+        bool valid {true};
     };
 
     std::vector<renderStruct> renderItems;
@@ -909,12 +915,16 @@ template <typename T> void CarouselComponent<T>::render(const glm::mat4& parentT
     for (int i {center - itemInclusion - itemInclusionBefore};
          i < center + itemInclusion + itemInclusionAfter; ++i) {
         int index {i};
+        bool validSlot {true};
 
         // Custom patch: when looping is disabled, don't wrap slot indices around to fill
-        // the visible window with duplicate entries. Instead simply leave those slots empty.
+        // the visible window with duplicate entries. Instead mark those slots invalid so
+        // they're skipped at draw time (see the "valid" field above).
         if (mLoopType == ListLoopType::LIST_NEVER_LOOP) {
-            if (index < 0 || index >= numEntries)
-                continue;
+            if (index < 0 || index >= numEntries) {
+                validSlot = false;
+                index = 0;
+            }
         }
         else {
             while (index < 0)
@@ -1081,6 +1091,7 @@ template <typename T> void CarouselComponent<T>::render(const glm::mat4& parentT
         renderItem.saturation = saturation;
         renderItem.dimming = dimming;
         renderItem.trans = itemTrans;
+        renderItem.valid = validSlot;
 
         renderItems.emplace_back(renderItem);
 
@@ -1140,6 +1151,9 @@ template <typename T> void CarouselComponent<T>::render(const glm::mat4& parentT
     }
 
     for (auto& renderItem : renderItemsSorted) {
+        if (!renderItem.valid)
+            continue;
+
         const std::shared_ptr<GuiComponent>& comp {mEntries.at(renderItem.index).data.item};
 
         if (comp == nullptr)
