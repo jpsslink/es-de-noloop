@@ -1,0 +1,98 @@
+name: Build Windows (no-loop carousel patch)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - carousel-no-loop
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC x64 developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Ensure 7-Zip is on PATH
+        shell: pwsh
+        run: |
+          $sevenZip = "C:\Program Files\7-Zip"
+          if (Test-Path "$sevenZip\7z.exe") {
+            Add-Content -Path $env:GITHUB_PATH -Value $sevenZip
+          } else {
+            choco install 7zip -y --no-progress
+            Add-Content -Path $env:GITHUB_PATH -Value $sevenZip
+          }
+
+      - name: Install jom (parallel nmake)
+        shell: pwsh
+        run: choco install jom -y --no-progress
+
+      - name: Silently pre-install OpenSSL (avoids interactive installer in setup script)
+        shell: pwsh
+        run: |
+          $target = "C:\Program Files\OpenSSL-Win64\libcrypto-4-x64.dll"
+          if (-not (Test-Path $target)) {
+            Write-Host "OpenSSL not found at expected path, installing silently..."
+            Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL_Light-4_0_1.exe" -OutFile "$env:RUNNER_TEMP\ossl.exe"
+            Start-Process -FilePath "$env:RUNNER_TEMP\ossl.exe" -ArgumentList "/SILENT","/SP-","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          } else {
+            Write-Host "OpenSSL already present, skipping installer."
+          }
+
+      - name: Download and build in-tree dependencies
+        shell: cmd
+        run: |
+          call tools\Windows_dependencies_setup.bat
+          if errorlevel 1 exit /b 1
+          call tools\Windows_dependencies_build.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Configure ES-DE (Release)
+        shell: cmd
+        run: |
+          cmake -G "NMake Makefiles JOM" -DCMAKE_BUILD_TYPE=Release .
+
+      - name: Build ES-DE
+        shell: cmd
+        run: |
+          jom -j%NUMBER_OF_PROCESSORS%
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path ".\ES-DE.exe")) {
+            Write-Error "ES-DE.exe was not produced by the build."
+            exit 1
+          }
+
+      - name: Stage build artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item ES-DE.exe dist\
+          Get-ChildItem -Path . -Filter *.dll | Copy-Item -Destination dist\
+          if (Test-Path LICENSE) { Copy-Item LICENSE dist\ }
+          if (Test-Path es-pdf-converter) { Copy-Item -Recurse es-pdf-converter dist\ }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ES-DE-windows-noloop-carousel
+          path: dist\
+          retention-days: 14
