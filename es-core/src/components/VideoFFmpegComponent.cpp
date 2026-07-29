@@ -1477,24 +1477,37 @@ void VideoFFmpegComponent::startVideoStream()
 
             mStreamSetupFailed = false;
             mStreamSetupComplete = false;
+            LOG(LogDebug) << "DIAG startVideoStream(): spawning setup thread for \""
+                          << mVideoPath << "\"";
             mStreamSetupThread =
                 std::make_unique<std::thread>(&VideoFFmpegComponent::setupVideoStream, this);
+            LOG(LogDebug) << "DIAG startVideoStream(): thread spawned OK";
         }
         else if (mStreamSetupComplete) {
+            LOG(LogDebug) << "DIAG startVideoStream(): setup complete, joining";
             // The background thread has finished (successfully or not). Joining it here is
             // effectively instant since it already signaled completion, and join() is what
             // makes all of its writes to member variables safely visible on this thread.
             mStreamSetupThread->join();
             mStreamSetupThread.reset();
+            LOG(LogDebug) << "DIAG startVideoStream(): joined OK, failed="
+                          << (mStreamSetupFailed ? "true" : "false");
 
             // Codec setup (including the hardware decoder path) runs here, synchronously on
             // the main thread, deliberately - see finishVideoStreamSetup().
             if (!mStreamSetupFailed && finishVideoStreamSetup()) {
+                LOG(LogDebug) << "DIAG startVideoStream(): finishVideoStreamSetup OK, resizing";
                 // Resize the video surface, which is needed both for the gamelist view and for
                 // the video screeensaver.
                 resize();
+                LOG(LogDebug) << "DIAG startVideoStream(): resize() OK";
                 calculateBlackFrame();
+                LOG(LogDebug) << "DIAG startVideoStream(): calculateBlackFrame() OK";
                 mFadeIn = 0.0f;
+                LOG(LogDebug) << "DIAG startVideoStream(): all done";
+            }
+            else {
+                LOG(LogDebug) << "DIAG startVideoStream(): setup or finish failed, giving up";
             }
         }
         // Otherwise the background thread is still working - nothing to do this frame, the
@@ -1513,10 +1526,13 @@ void VideoFFmpegComponent::setupVideoStream()
     // VideoFFmpegComponent instance, with no locking, because it was only ever designed to
     // run on a single thread. Running it here too, concurrently with another instance's
     // setup, corrupted that shared state and crashed the app.
+    LOG(LogDebug) << "DIAG setupVideoStream(): ENTER, mVideoPath=\"" << mVideoPath << "\"";
     std::string filePath {"file:" + mVideoPath};
+    LOG(LogDebug) << "DIAG setupVideoStream(): filePath built";
 
     // This will disable the FFmpeg logging, so comment this out if debug info is needed.
     av_log_set_callback(nullptr);
+    LOG(LogDebug) << "DIAG setupVideoStream(): about to call avformat_open_input";
 
     if (avformat_open_input(&mFormatContext, filePath.c_str(), nullptr, nullptr)) {
         LOG(LogError) << "VideoFFmpegComponent::setupVideoStream(): "
@@ -1526,6 +1542,7 @@ void VideoFFmpegComponent::setupVideoStream()
         mStreamSetupComplete = true;
         return;
     }
+    LOG(LogDebug) << "DIAG setupVideoStream(): avformat_open_input OK, about to probe streams";
 
     if (avformat_find_stream_info(mFormatContext, nullptr)) {
         LOG(LogError) << "VideoFFmpegComponent::setupVideoStream(): "
@@ -1536,7 +1553,9 @@ void VideoFFmpegComponent::setupVideoStream()
         return;
     }
 
+    LOG(LogDebug) << "DIAG setupVideoStream(): probe OK, signaling complete";
     mStreamSetupComplete = true;
+    LOG(LogDebug) << "DIAG setupVideoStream(): EXIT (success)";
 }
 
 bool VideoFFmpegComponent::finishVideoStreamSetup()
@@ -1546,6 +1565,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
     // what used to be the synchronous body of startVideoStream() before this patch: codec
     // lookup/setup for video and audio, including decoderInitHW(). See the comment in
     // setupVideoStream() for why this must stay on the main thread.
+    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): ENTER";
     mVideoStreamIndex = -1;
     mAudioStreamIndex = -1;
 
@@ -1589,10 +1609,17 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
                          mFormatContext->streams[mVideoStreamIndex]->codecpar->codec_id)
                   << ", decoder: " << (hwDecoding ? "hardware" : "software") << ")";
 
+    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): stream found, about to init decoder "
+                     "(hwDecoding="
+                  << (hwDecoding ? "true" : "false") << ")";
+
     if (hwDecoding)
         mSWDecoder = decoderInitHW();
     else
         mSWDecoder = true;
+
+    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): decoder init done, mSWDecoder="
+                  << (mSWDecoder ? "true" : "false");
 
     if (mSWDecoder) {
         // The hardware decoder initialization failed, which can happen for a number of reasons.
@@ -1640,6 +1667,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
             return false;
         }
     }
+    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): video codec setup OK";
 
     // Audio stream setup, optional as some videos do not have any audio tracks.
     // Audio can also be disabled per video via the theme configuration.
@@ -1691,6 +1719,9 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
         }
     }
 
+    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): audio setup OK, mAudioStreamIndex="
+                  << mAudioStreamIndex;
+
     mVideoTimeBase = 1.0l / av_q2d(mVideoStream->avg_frame_rate);
 
     // Set some reasonable target queue sizes (buffers).
@@ -1706,6 +1737,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
     mAudioFrame = av_frame_alloc();
     mAudioFrameResampled = av_frame_alloc();
 
+    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): EXIT (success)";
     return true;
 }
 
@@ -1721,8 +1753,11 @@ void VideoFFmpegComponent::stopVideoPlayer(bool muteAudio)
     // call site that selects a new video already calls stopVideoPlayer() before changing
     // mVideoPath, so this never blocks waiting on a video other than the one being abandoned.
     if (mStreamSetupThread) {
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): joining in-flight setup thread for \""
+                      << mVideoPath << "\"";
         mStreamSetupThread->join();
         mStreamSetupThread.reset();
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): joined OK";
     }
     mStreamSetupComplete = false;
     mStreamSetupFailed = false;
