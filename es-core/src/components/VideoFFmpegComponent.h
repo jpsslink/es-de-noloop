@@ -66,10 +66,16 @@ public:
 
 private:
     void startVideoStream() override;
-    // Custom patch: the actual blocking file-open/probe/codec-setup work, run on
+    // Custom patch: the blocking demuxer-level file-open/probe work only, run on
     // mStreamSetupThread instead of the main thread. Sets mStreamSetupComplete (and
-    // mStreamSetupFailed on error) as the very last step.
+    // mStreamSetupFailed on error) as the very last step. Deliberately excludes codec
+    // setup/decoderInitHW(), which touch state shared across all VideoFFmpegComponent
+    // instances (static members) and must stay single-threaded - see finishVideoStreamSetup().
     void setupVideoStream();
+    // Custom patch: runs on the main thread after mStreamSetupThread is joined. Codec
+    // lookup/setup for video and audio, including the hardware decoder path. Returns false
+    // if setup could not be completed.
+    bool finishVideoStreamSetup();
 
     // Calculates the correct mSize from our resizing information (set by setResize/setMaxSize).
     // Used internally whenever the resizing parameters or texture change.
