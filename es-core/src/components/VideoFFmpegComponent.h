@@ -128,6 +128,16 @@ private:
     std::unique_ptr<std::thread> mStreamSetupThread;
     std::atomic<bool> mStreamSetupComplete;
     std::atomic<bool> mStreamSetupFailed;
+    // Custom patch (bugfix): mFormatContext is written by the background thread as a side
+    // effect of avformat_open_input(), which happens well before the codec setup that used
+    // to run in the same synchronous call is actually done. Every other piece of code in
+    // this class (render(), updatePlayer(), and startVideoStream() itself) used to treat
+    // "mFormatContext non-null" as "fully ready to play", which was a safe assumption in the
+    // original single-threaded code but is no longer true here - there's now a window where
+    // mFormatContext is set but the codecs, packet/frame buffers etc. are not. This flag is
+    // only ever set (main thread only, after finishVideoStreamSetup() succeeds) once
+    // everything is actually ready, and is what those checks use instead.
+    bool mStreamReady {false};
 
     AVFormatContext* mFormatContext;
     AVStream* mVideoStream;

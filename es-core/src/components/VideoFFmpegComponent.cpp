@@ -209,7 +209,9 @@ void VideoFFmpegComponent::render(const glm::mat4& parentTrans)
     glm::mat4 trans {parentTrans * getTransform()};
     GuiComponent::renderChildren(trans);
 
-    if (mIsPlaying && mFormatContext) {
+    // Custom patch (bugfix): use mStreamReady instead of mFormatContext - see its
+    // declaration in the header for why mFormatContext alone is not a safe readiness check.
+    if (mIsPlaying && mStreamReady) {
         Renderer::Vertex vertices[4];
 
         if (Settings::getInstance()->getBool("DebugImage")) {
@@ -345,7 +347,9 @@ void VideoFFmpegComponent::render(const glm::mat4& parentTrans)
 
 void VideoFFmpegComponent::updatePlayer()
 {
-    if (mPaused || !mFormatContext)
+    // Custom patch (bugfix): use mStreamReady instead of mFormatContext - see its
+    // declaration in the header for why mFormatContext alone is not a safe readiness check.
+    if (mPaused || !mStreamReady)
         return;
 
     const long double deltaTime {
@@ -1445,13 +1449,19 @@ void VideoFFmpegComponent::startVideoStream()
 
     mIsPlaying = true;
 
-    if (!mFormatContext) {
+    if (!mStreamReady) {
         // Custom patch: this function is invoked every frame (from VideoComponent::update(),
-        // on the main thread) for as long as mFormatContext stays null, so it must remain
+        // on the main thread) for as long as mStreamReady stays false, so it must remain
         // idempotent. The actual blocking work (opening/probing the file and setting up the
         // codecs, see setupVideoStream()) now runs on a background thread instead of here,
         // so that a slow disk read (e.g. a video file not yet in the OS file cache) never
         // stalls the main thread and whatever animation is in progress at the time.
+        // Bugfix: this used to gate on "!mFormatContext" instead of "!mStreamReady", but
+        // mFormatContext gets set by the background thread as soon as avformat_open_input()
+        // succeeds - well before the codecs are actually set up - so that check went false
+        // (and this whole block, including joining the thread, got skipped forever) the very
+        // first frame after the file was opened, leaving codec setup never done and the
+        // background thread never joined. See mStreamReady's declaration for more detail.
         if (!mStreamSetupThread) {
             mHardwareCodec = nullptr;
             mHwContext = nullptr;
@@ -1518,7 +1528,8 @@ void VideoFFmpegComponent::startVideoStream()
                 LOG(LogDebug) << "DIAG startVideoStream(): calculateBlackFrame() OK";
             Log::flush();
                 mFadeIn = 0.0f;
-                LOG(LogDebug) << "DIAG startVideoStream(): all done";
+                mStreamReady = true;
+                LOG(LogDebug) << "DIAG startVideoStream(): all done, mStreamReady=true";
             Log::flush();
             }
             else {
@@ -1797,6 +1808,7 @@ void VideoFFmpegComponent::stopVideoPlayer(bool muteAudio)
     }
     mStreamSetupComplete = false;
     mStreamSetupFailed = false;
+    mStreamReady = false;
 
     mIsPlaying = false;
     mIsActuallyPlaying = false;
