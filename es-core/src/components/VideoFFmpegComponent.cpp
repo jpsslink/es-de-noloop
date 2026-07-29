@@ -322,7 +322,8 @@ void VideoFFmpegComponent::render(const glm::mat4& parentTrans)
                 // Build a texture for the video frame.
                 mTexture->initFromPixels(&tempPictureRGBA.at(0), pictureWidth, pictureHeight);
                 auto diagT1 = std::chrono::high_resolution_clock::now();
-                mTexture->bind(0);
+                if (mTexture != nullptr)
+                    mTexture->bind(0);
                 auto diagT2 = std::chrono::high_resolution_clock::now();
                 double diagInitMs {std::chrono::duration<double, std::milli>(diagT1 - diagT0).count()};
                 double diagBindMs {std::chrono::duration<double, std::milli>(diagT2 - diagT1).count()};
@@ -1852,17 +1853,60 @@ void VideoFFmpegComponent::stopVideoPlayer(bool muteAudio)
         AudioManager::getInstance().clearStream();
 
     if (mFormatContext) {
+        // Custom patch (perf diag): mFormatContext non-null no longer implies the codec/frame/
+        // packet resources below were actually allocated - see mStreamReady's declaration in
+        // the header. If stopVideoPlayer() is called after setupVideoStream() has opened the
+        // file but before finishVideoStreamSetup() has run, mVideoFrame/mPacket/mHwContext/etc.
+        // are still whatever they were reset to (should be nullptr), while mFormatContext is
+        // already valid. Log each pointer and bracket each free call so that if this still
+        // crashes, the log pinpoints the exact call and pointer state.
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown ENTER mVideoFrame="
+                      << static_cast<void*>(mVideoFrame) << " mVideoFrameResampled="
+                      << static_cast<void*>(mVideoFrameResampled)
+                      << " mAudioFrame=" << static_cast<void*>(mAudioFrame)
+                      << " mAudioFrameResampled=" << static_cast<void*>(mAudioFrameResampled)
+                      << " mPacket=" << static_cast<void*>(mPacket)
+                      << " mHwContext=" << static_cast<void*>(mHwContext)
+                      << " mVideoCodecContext=" << static_cast<void*>(mVideoCodecContext)
+                      << " mAudioCodecContext=" << static_cast<void*>(mAudioCodecContext)
+                      << " mFormatContext=" << static_cast<void*>(mFormatContext);
+        Log::flush();
         av_frame_free(&mVideoFrame);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mVideoFrame) OK";
+        Log::flush();
         av_frame_free(&mVideoFrameResampled);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mVideoFrameResampled) OK";
+        Log::flush();
         av_frame_free(&mAudioFrame);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mAudioFrame) OK";
+        Log::flush();
         av_frame_free(&mAudioFrameResampled);
-        av_packet_unref(mPacket);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mAudioFrameResampled) OK";
+        Log::flush();
+        if (mPacket)
+            av_packet_unref(mPacket);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_packet_unref OK";
+        Log::flush();
         av_packet_free(&mPacket);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_packet_free OK";
+        Log::flush();
         av_buffer_unref(&mHwContext);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_buffer_unref OK";
+        Log::flush();
         avcodec_free_context(&mVideoCodecContext);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avcodec_free_context(video) OK";
+        Log::flush();
         avcodec_free_context(&mAudioCodecContext);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avcodec_free_context(audio) OK";
+        Log::flush();
         avformat_close_input(&mFormatContext);
-        avformat_free_context(mFormatContext);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avformat_close_input OK, mFormatContext now="
+                      << static_cast<void*>(mFormatContext);
+        Log::flush();
+        if (mFormatContext)
+            avformat_free_context(mFormatContext);
+        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avformat_free_context OK";
+        Log::flush();
         mVideoCodecContext = nullptr;
         mAudioCodecContext = nullptr;
         mFormatContext = nullptr;
