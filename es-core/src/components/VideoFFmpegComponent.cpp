@@ -1479,12 +1479,15 @@ void VideoFFmpegComponent::startVideoStream()
             mStreamSetupComplete = false;
             LOG(LogDebug) << "DIAG startVideoStream(): spawning setup thread for \""
                           << mVideoPath << "\"";
+            Log::flush();
             mStreamSetupThread =
                 std::make_unique<std::thread>(&VideoFFmpegComponent::setupVideoStream, this);
             LOG(LogDebug) << "DIAG startVideoStream(): thread spawned OK";
+            Log::flush();
         }
         else if (mStreamSetupComplete) {
             LOG(LogDebug) << "DIAG startVideoStream(): setup complete, joining";
+            Log::flush();
             // The background thread has finished (successfully or not). Joining it here is
             // effectively instant since it already signaled completion, and join() is what
             // makes all of its writes to member variables safely visible on this thread.
@@ -1492,22 +1495,28 @@ void VideoFFmpegComponent::startVideoStream()
             mStreamSetupThread.reset();
             LOG(LogDebug) << "DIAG startVideoStream(): joined OK, failed="
                           << (mStreamSetupFailed ? "true" : "false");
+            Log::flush();
 
             // Codec setup (including the hardware decoder path) runs here, synchronously on
             // the main thread, deliberately - see finishVideoStreamSetup().
             if (!mStreamSetupFailed && finishVideoStreamSetup()) {
                 LOG(LogDebug) << "DIAG startVideoStream(): finishVideoStreamSetup OK, resizing";
+            Log::flush();
                 // Resize the video surface, which is needed both for the gamelist view and for
                 // the video screeensaver.
                 resize();
                 LOG(LogDebug) << "DIAG startVideoStream(): resize() OK";
+            Log::flush();
                 calculateBlackFrame();
                 LOG(LogDebug) << "DIAG startVideoStream(): calculateBlackFrame() OK";
+            Log::flush();
                 mFadeIn = 0.0f;
                 LOG(LogDebug) << "DIAG startVideoStream(): all done";
+            Log::flush();
             }
             else {
                 LOG(LogDebug) << "DIAG startVideoStream(): setup or finish failed, giving up";
+            Log::flush();
             }
         }
         // Otherwise the background thread is still working - nothing to do this frame, the
@@ -1527,12 +1536,15 @@ void VideoFFmpegComponent::setupVideoStream()
     // run on a single thread. Running it here too, concurrently with another instance's
     // setup, corrupted that shared state and crashed the app.
     LOG(LogDebug) << "DIAG setupVideoStream(): ENTER, mVideoPath=\"" << mVideoPath << "\"";
+            Log::flush();
     std::string filePath {"file:" + mVideoPath};
     LOG(LogDebug) << "DIAG setupVideoStream(): filePath built";
+            Log::flush();
 
     // This will disable the FFmpeg logging, so comment this out if debug info is needed.
     av_log_set_callback(nullptr);
     LOG(LogDebug) << "DIAG setupVideoStream(): about to call avformat_open_input";
+            Log::flush();
 
     if (avformat_open_input(&mFormatContext, filePath.c_str(), nullptr, nullptr)) {
         LOG(LogError) << "VideoFFmpegComponent::setupVideoStream(): "
@@ -1543,6 +1555,7 @@ void VideoFFmpegComponent::setupVideoStream()
         return;
     }
     LOG(LogDebug) << "DIAG setupVideoStream(): avformat_open_input OK, about to probe streams";
+            Log::flush();
 
     if (avformat_find_stream_info(mFormatContext, nullptr)) {
         LOG(LogError) << "VideoFFmpegComponent::setupVideoStream(): "
@@ -1554,8 +1567,10 @@ void VideoFFmpegComponent::setupVideoStream()
     }
 
     LOG(LogDebug) << "DIAG setupVideoStream(): probe OK, signaling complete";
+            Log::flush();
     mStreamSetupComplete = true;
     LOG(LogDebug) << "DIAG setupVideoStream(): EXIT (success)";
+            Log::flush();
 }
 
 bool VideoFFmpegComponent::finishVideoStreamSetup()
@@ -1566,6 +1581,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
     // lookup/setup for video and audio, including decoderInitHW(). See the comment in
     // setupVideoStream() for why this must stay on the main thread.
     LOG(LogDebug) << "DIAG finishVideoStreamSetup(): ENTER";
+            Log::flush();
     mVideoStreamIndex = -1;
     mAudioStreamIndex = -1;
 
@@ -1612,6 +1628,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
     LOG(LogDebug) << "DIAG finishVideoStreamSetup(): stream found, about to init decoder "
                      "(hwDecoding="
                   << (hwDecoding ? "true" : "false") << ")";
+            Log::flush();
 
     if (hwDecoding)
         mSWDecoder = decoderInitHW();
@@ -1620,6 +1637,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
 
     LOG(LogDebug) << "DIAG finishVideoStreamSetup(): decoder init done, mSWDecoder="
                   << (mSWDecoder ? "true" : "false");
+            Log::flush();
 
     if (mSWDecoder) {
         // The hardware decoder initialization failed, which can happen for a number of reasons.
@@ -1668,6 +1686,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
         }
     }
     LOG(LogDebug) << "DIAG finishVideoStreamSetup(): video codec setup OK";
+            Log::flush();
 
     // Audio stream setup, optional as some videos do not have any audio tracks.
     // Audio can also be disabled per video via the theme configuration.
@@ -1721,6 +1740,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
 
     LOG(LogDebug) << "DIAG finishVideoStreamSetup(): audio setup OK, mAudioStreamIndex="
                   << mAudioStreamIndex;
+            Log::flush();
 
     mVideoTimeBase = 1.0l / av_q2d(mVideoStream->avg_frame_rate);
 
@@ -1738,6 +1758,7 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
     mAudioFrameResampled = av_frame_alloc();
 
     LOG(LogDebug) << "DIAG finishVideoStreamSetup(): EXIT (success)";
+            Log::flush();
     return true;
 }
 
@@ -1755,9 +1776,11 @@ void VideoFFmpegComponent::stopVideoPlayer(bool muteAudio)
     if (mStreamSetupThread) {
         LOG(LogDebug) << "DIAG stopVideoPlayer(): joining in-flight setup thread for \""
                       << mVideoPath << "\"";
+            Log::flush();
         mStreamSetupThread->join();
         mStreamSetupThread.reset();
         LOG(LogDebug) << "DIAG stopVideoPlayer(): joined OK";
+            Log::flush();
     }
     mStreamSetupComplete = false;
     mStreamSetupFailed = false;
