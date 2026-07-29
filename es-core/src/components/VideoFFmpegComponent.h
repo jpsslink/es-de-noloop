@@ -66,6 +66,10 @@ public:
 
 private:
     void startVideoStream() override;
+    // Custom patch: the actual blocking file-open/probe/codec-setup work, run on
+    // mStreamSetupThread instead of the main thread. Sets mStreamSetupComplete (and
+    // mStreamSetupFailed on error) as the very last step.
+    void setupVideoStream();
 
     // Calculates the correct mSize from our resizing information (set by setResize/setMaxSize).
     // Used internally whenever the resizing parameters or texture change.
@@ -108,6 +112,16 @@ private:
     std::unique_ptr<std::thread> mFrameProcessingThread;
     std::mutex mPictureMutex;
     std::mutex mAudioMutex;
+
+    // Custom patch: opening the video file and probing its streams (avformat_open_input,
+    // avformat_find_stream_info) plus codec setup are slow, blocking, disk-I/O-bound calls.
+    // Running them synchronously on the main thread (as the original code did) stalls
+    // whatever animation is in progress (e.g. the carousel selection scale-up) whenever a
+    // video file hasn't been read before and isn't yet in the OS file cache. This background
+    // thread moves that blocking work off the main thread; see setupVideoStream().
+    std::unique_ptr<std::thread> mStreamSetupThread;
+    std::atomic<bool> mStreamSetupComplete;
+    std::atomic<bool> mStreamSetupFailed;
 
     AVFormatContext* mFormatContext;
     AVStream* mVideoStream;
