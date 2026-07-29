@@ -314,16 +314,33 @@ void VideoFFmpegComponent::render(const glm::mat4& parentTrans)
             pictureLock.unlock();
 
             if (pictureSize > 0) {
+                // Custom patch (perf diag): measure the cost of the per-frame texture
+                // teardown+recreate path (initFromPixels -> releaseVRAM/glDeleteTextures +
+                // createTexture/glTexImage2D on the next bind()) to check whether it's a
+                // significant contributor to the reported low frame rate during video playback.
+                auto diagT0 = std::chrono::high_resolution_clock::now();
                 // Build a texture for the video frame.
                 mTexture->initFromPixels(&tempPictureRGBA.at(0), pictureWidth, pictureHeight);
+                auto diagT1 = std::chrono::high_resolution_clock::now();
+                mTexture->bind(0);
+                auto diagT2 = std::chrono::high_resolution_clock::now();
+                double diagInitMs {std::chrono::duration<double, std::milli>(diagT1 - diagT0).count()};
+                double diagBindMs {std::chrono::duration<double, std::milli>(diagT2 - diagT1).count()};
+                LOG(LogDebug) << "DIAG texUpload: " << pictureWidth << "x" << pictureHeight
+                             << " initFromPixels=" << diagInitMs << "ms bind(createTexture)="
+                             << diagBindMs << "ms path=\"" << mVideoPath << "\"";
+                Log::flush();
+            }
+            else {
+                if (mTexture != nullptr)
+                    mTexture->bind(0);
             }
         }
         else {
             pictureLock.unlock();
+            if (mTexture != nullptr)
+                mTexture->bind(0);
         }
-
-        if (mTexture != nullptr)
-            mTexture->bind(0);
 
         // Render scanlines if this option is enabled. However, if this is the media viewer
         // or the video screensaver, then skip this as the scanline rendering is then handled

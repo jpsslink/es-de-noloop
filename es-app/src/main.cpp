@@ -571,6 +571,11 @@ void applicationLoop()
         window->render();
 
         renderer->swapBuffers();
+        // Custom patch (perf diag): flag any frame that took longer than ~30fps (33ms) so we
+        // can correlate main-loop hitches with the per-frame video texture upload timings
+        // logged in VideoFFmpegComponent::render().
+        if (deltaTime > 33)
+            LOG(LogDebug) << "DIAG mainLoop: slow frame, deltaTime=" << deltaTime << "ms";
         Log::flush();
 #if !defined(__EMSCRIPTEN__)
     }
