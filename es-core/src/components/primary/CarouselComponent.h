@@ -920,7 +920,15 @@ template <typename T> void CarouselComponent<T>::render(const glm::mat4& parentT
         // Custom patch: when looping is disabled, don't wrap slot indices around to fill
         // the visible window with duplicate entries. Instead mark those slots invalid so
         // they're skipped at draw time (see the "valid" field above).
-        if (mLoopType == ListLoopType::LIST_NEVER_LOOP) {
+        // The singleEntry case must be handled separately: the loop only ever produces one
+        // renderStruct when singleEntry is true (see the "if (singleEntry) break;" below),
+        // and that one entry always represents index 0 - there is no wraparound concept
+        // for a one-item list, so it must never be marked invalid regardless of loop type.
+        if (singleEntry) {
+            index = 0;
+            validSlot = true;
+        }
+        else if (mLoopType == ListLoopType::LIST_NEVER_LOOP) {
             if (index < 0 || index >= numEntries) {
                 validSlot = false;
                 index = 0;
