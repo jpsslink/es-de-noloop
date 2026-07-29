@@ -32,9 +32,6 @@
 VideoFFmpegComponent::VideoFFmpegComponent()
     : mBlackFrameOffset {0.0f, 0.0f}
     , mFrameProcessingThread {nullptr}
-    , mStreamSetupThread {nullptr}
-    , mStreamSetupComplete {false}
-    , mStreamSetupFailed {false}
     , mFormatContext {nullptr}
     , mVideoStream {nullptr}
     , mAudioStream {nullptr}
@@ -209,9 +206,7 @@ void VideoFFmpegComponent::render(const glm::mat4& parentTrans)
     glm::mat4 trans {parentTrans * getTransform()};
     GuiComponent::renderChildren(trans);
 
-    // Custom patch (bugfix): use mStreamReady instead of mFormatContext - see its
-    // declaration in the header for why mFormatContext alone is not a safe readiness check.
-    if (mIsPlaying && mStreamReady) {
+    if (mIsPlaying && mFormatContext) {
         Renderer::Vertex vertices[4];
 
         if (Settings::getInstance()->getBool("DebugImage")) {
@@ -314,34 +309,16 @@ void VideoFFmpegComponent::render(const glm::mat4& parentTrans)
             pictureLock.unlock();
 
             if (pictureSize > 0) {
-                // Custom patch (perf diag): measure the cost of the per-frame texture
-                // teardown+recreate path (initFromPixels -> releaseVRAM/glDeleteTextures +
-                // createTexture/glTexImage2D on the next bind()) to check whether it's a
-                // significant contributor to the reported low frame rate during video playback.
-                auto diagT0 = std::chrono::high_resolution_clock::now();
                 // Build a texture for the video frame.
                 mTexture->initFromPixels(&tempPictureRGBA.at(0), pictureWidth, pictureHeight);
-                auto diagT1 = std::chrono::high_resolution_clock::now();
-                if (mTexture != nullptr)
-                    mTexture->bind(0);
-                auto diagT2 = std::chrono::high_resolution_clock::now();
-                double diagInitMs {std::chrono::duration<double, std::milli>(diagT1 - diagT0).count()};
-                double diagBindMs {std::chrono::duration<double, std::milli>(diagT2 - diagT1).count()};
-                LOG(LogDebug) << "DIAG texUpload: " << pictureWidth << "x" << pictureHeight
-                             << " initFromPixels=" << diagInitMs << "ms bind(createTexture)="
-                             << diagBindMs << "ms path=\"" << mVideoPath << "\"";
-                Log::flush();
-            }
-            else {
-                if (mTexture != nullptr)
-                    mTexture->bind(0);
             }
         }
         else {
             pictureLock.unlock();
-            if (mTexture != nullptr)
-                mTexture->bind(0);
         }
+
+        if (mTexture != nullptr)
+            mTexture->bind(0);
 
         // Render scanlines if this option is enabled. However, if this is the media viewer
         // or the video screensaver, then skip this as the scanline rendering is then handled
@@ -365,9 +342,7 @@ void VideoFFmpegComponent::render(const glm::mat4& parentTrans)
 
 void VideoFFmpegComponent::updatePlayer()
 {
-    // Custom patch (bugfix): use mStreamReady instead of mFormatContext - see its
-    // declaration in the header for why mFormatContext alone is not a safe readiness check.
-    if (mPaused || !mStreamReady)
+    if (mPaused || !mFormatContext)
         return;
 
     const long double deltaTime {
@@ -1455,378 +1430,236 @@ bool VideoFFmpegComponent::decoderInitHW()
 
 void VideoFFmpegComponent::startVideoStream()
 {
-    LOG(LogDebug) << "DIAG startVideoStream(): CALLED, this=" << static_cast<void*>(this)
-                  << " mVideoPath=\"" << mVideoPath << "\" mVisible="
-                  << (mVisible ? "true" : "false") << " mThemeOpacity=" << mThemeOpacity
-                  << " mFormatContext=" << static_cast<void*>(mFormatContext)
-                  << " mStreamSetupThread=" << static_cast<void*>(mStreamSetupThread.get());
-    Log::flush();
-
     if (!mVisible || mThemeOpacity == 0.0f)
         return;
 
     mIsPlaying = true;
 
-    if (!mStreamReady) {
-        // Custom patch: this function is invoked every frame (from VideoComponent::update(),
-        // on the main thread) for as long as mStreamReady stays false, so it must remain
-        // idempotent. The actual blocking work (opening/probing the file and setting up the
-        // codecs, see setupVideoStream()) now runs on a background thread instead of here,
-        // so that a slow disk read (e.g. a video file not yet in the OS file cache) never
-        // stalls the main thread and whatever animation is in progress at the time.
-        // Bugfix: this used to gate on "!mFormatContext" instead of "!mStreamReady", but
-        // mFormatContext gets set by the background thread as soon as avformat_open_input()
-        // succeeds - well before the codecs are actually set up - so that check went false
-        // (and this whole block, including joining the thread, got skipped forever) the very
-        // first frame after the file was opened, leaving codec setup never done and the
-        // background thread never joined. See mStreamReady's declaration for more detail.
-        if (!mStreamSetupThread) {
-            mHardwareCodec = nullptr;
-            mHwContext = nullptr;
-            mFrameProcessingThread = nullptr;
-            mVideoWidth = 0;
-            mVideoHeight = 0;
-            mLinePaddingComp = 0.0f;
-            mAccumulatedTime = 0.0;
-            mStartTimeAccumulation = false;
-            mSWDecoder = true;
-            mDecodedFrame = false;
-            mReadAllFrames = false;
-            mEndOfVideo = false;
-            mVideoFrameCount = 0;
-            mAudioFrameCount = 0;
-            mVideoFrameReadCount = 0;
-            mVideoFrameDroppedCount = 0;
-            mOutputPicture = {};
+    if (!mFormatContext) {
+        mHardwareCodec = nullptr;
+        mHwContext = nullptr;
+        mFrameProcessingThread = nullptr;
+        mVideoWidth = 0;
+        mVideoHeight = 0;
+        mLinePaddingComp = 0.0f;
+        mAccumulatedTime = 0.0;
+        mStartTimeAccumulation = false;
+        mSWDecoder = true;
+        mDecodedFrame = false;
+        mReadAllFrames = false;
+        mEndOfVideo = false;
+        mVideoFrameCount = 0;
+        mAudioFrameCount = 0;
+        mVideoFrameReadCount = 0;
+        mVideoFrameDroppedCount = 0;
+        mOutputPicture = {};
 
-            // Get an empty texture for rendering the video.
-            mTexture = TextureResource::get("");
-            mTexture->setLinearMagnify(mLinearInterpolation);
+        // Get an empty texture for rendering the video.
+        mTexture = TextureResource::get("");
+        mTexture->setLinearMagnify(mLinearInterpolation);
 
-            // This is used for the audio and video synchronization.
-            mTimeReference = std::chrono::high_resolution_clock::now();
+        // This is used for the audio and video synchronization.
+        mTimeReference = std::chrono::high_resolution_clock::now();
 
-            // Clear the video and audio frame queues.
-            std::queue<VideoFrame>().swap(mVideoFrameQueue);
-            std::queue<AudioFrame>().swap(mAudioFrameQueue);
+        // Clear the video and audio frame queues.
+        std::queue<VideoFrame>().swap(mVideoFrameQueue);
+        std::queue<AudioFrame>().swap(mAudioFrameQueue);
 
-            mStreamSetupFailed = false;
-            mStreamSetupComplete = false;
-            LOG(LogDebug) << "DIAG startVideoStream(): spawning setup thread for \""
+        std::string filePath {"file:" + mVideoPath};
+
+        // This will disable the FFmpeg logging, so comment this out if debug info is needed.
+        av_log_set_callback(nullptr);
+
+        // File operations and basic setup.
+
+        if (avformat_open_input(&mFormatContext, filePath.c_str(), nullptr, nullptr)) {
+            LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                             "Couldn't open video file \""
                           << mVideoPath << "\"";
-            Log::flush();
-            mStreamSetupThread =
-                std::make_unique<std::thread>(&VideoFFmpegComponent::setupVideoStream, this);
-            LOG(LogDebug) << "DIAG startVideoStream(): thread spawned OK";
-            Log::flush();
+            return;
         }
-        else if (mStreamSetupComplete) {
-            LOG(LogDebug) << "DIAG startVideoStream(): setup complete, joining";
-            Log::flush();
-            // The background thread has finished (successfully or not). Joining it here is
-            // effectively instant since it already signaled completion, and join() is what
-            // makes all of its writes to member variables safely visible on this thread.
-            mStreamSetupThread->join();
-            mStreamSetupThread.reset();
-            LOG(LogDebug) << "DIAG startVideoStream(): joined OK, failed="
-                          << (mStreamSetupFailed ? "true" : "false");
-            Log::flush();
 
-            // Codec setup (including the hardware decoder path) runs here, synchronously on
-            // the main thread, deliberately - see finishVideoStreamSetup().
-            if (!mStreamSetupFailed && finishVideoStreamSetup()) {
-                LOG(LogDebug) << "DIAG startVideoStream(): finishVideoStreamSetup OK, resizing";
-            Log::flush();
-                // Resize the video surface, which is needed both for the gamelist view and for
-                // the video screeensaver.
-                resize();
-                LOG(LogDebug) << "DIAG startVideoStream(): resize() OK";
-            Log::flush();
-                calculateBlackFrame();
-                LOG(LogDebug) << "DIAG startVideoStream(): calculateBlackFrame() OK";
-            Log::flush();
-                mFadeIn = 0.0f;
-                mStreamReady = true;
-                LOG(LogDebug) << "DIAG startVideoStream(): all done, mStreamReady=true";
-            Log::flush();
-            }
-            else {
-                LOG(LogDebug) << "DIAG startVideoStream(): setup or finish failed, giving up";
-            Log::flush();
-            }
+        if (avformat_find_stream_info(mFormatContext, nullptr)) {
+            LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                             "Couldn't read stream information from video file \""
+                          << mVideoPath << "\"";
+            return;
         }
-        // Otherwise the background thread is still working - nothing to do this frame, the
-        // static image (if any) keeps being rendered via VideoComponent::renderStaticImage().
-    }
-}
 
-void VideoFFmpegComponent::setupVideoStream()
-{
-    // Custom patch: only the demuxer-level file open and stream probing run on this
-    // background thread - these are the genuinely disk-I/O-bound, potentially slow calls,
-    // especially for a video file not yet present in the OS file cache. Codec setup
-    // (finishVideoStreamSetup(), including decoderInitHW()) is deliberately kept on the main
-    // thread: decoderInitHW() reads/writes state (sDeviceType, sPixelFormat,
-    // sSWDecodedVideos, sHWDecodedVideos) that is static/shared across every
-    // VideoFFmpegComponent instance, with no locking, because it was only ever designed to
-    // run on a single thread. Running it here too, concurrently with another instance's
-    // setup, corrupted that shared state and crashed the app.
-    LOG(LogDebug) << "DIAG setupVideoStream(): ENTER, mVideoPath=\"" << mVideoPath << "\"";
-            Log::flush();
-    std::string filePath {"file:" + mVideoPath};
-    LOG(LogDebug) << "DIAG setupVideoStream(): filePath built";
-            Log::flush();
+        mVideoStreamIndex = -1;
+        mAudioStreamIndex = -1;
 
-    // This will disable the FFmpeg logging, so comment this out if debug info is needed.
-    av_log_set_callback(nullptr);
-    LOG(LogDebug) << "DIAG setupVideoStream(): about to call avformat_open_input";
-            Log::flush();
-
-    if (avformat_open_input(&mFormatContext, filePath.c_str(), nullptr, nullptr)) {
-        LOG(LogError) << "VideoFFmpegComponent::setupVideoStream(): "
-                         "Couldn't open video file \""
-                      << mVideoPath << "\"";
-        mStreamSetupFailed = true;
-        mStreamSetupComplete = true;
-        return;
-    }
-    LOG(LogDebug) << "DIAG setupVideoStream(): avformat_open_input OK, about to probe streams";
-            Log::flush();
-
-    if (avformat_find_stream_info(mFormatContext, nullptr)) {
-        LOG(LogError) << "VideoFFmpegComponent::setupVideoStream(): "
-                         "Couldn't read stream information from video file \""
-                      << mVideoPath << "\"";
-        mStreamSetupFailed = true;
-        mStreamSetupComplete = true;
-        return;
-    }
-
-    LOG(LogDebug) << "DIAG setupVideoStream(): probe OK, signaling complete";
-            Log::flush();
-    mStreamSetupComplete = true;
-    LOG(LogDebug) << "DIAG setupVideoStream(): EXIT (success)";
-            Log::flush();
-}
-
-bool VideoFFmpegComponent::finishVideoStreamSetup()
-{
-    // Custom patch: runs on the main thread, right after mStreamSetupThread (which only
-    // opened the file and probed its streams) has been joined. This is the remainder of
-    // what used to be the synchronous body of startVideoStream() before this patch: codec
-    // lookup/setup for video and audio, including decoderInitHW(). See the comment in
-    // setupVideoStream() for why this must stay on the main thread.
-    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): ENTER";
-            Log::flush();
-    mVideoStreamIndex = -1;
-    mAudioStreamIndex = -1;
-
-    // Video stream setup.
+        // Video stream setup.
 
 #if defined(VIDEO_HW_DECODING)
-    bool hwDecoding {Settings::getInstance()->getBool("VideoHardwareDecoding")};
+        bool hwDecoding {Settings::getInstance()->getBool("VideoHardwareDecoding")};
 #else
-    bool hwDecoding {false};
+        bool hwDecoding {false};
 #endif
 
 #if LIBAVUTIL_VERSION_MAJOR > 56
-    mVideoStreamIndex = av_find_best_stream(mFormatContext, AVMEDIA_TYPE_VIDEO, -1, -1,
-                                            const_cast<const AVCodec**>(&mHardwareCodec), 0);
+        mVideoStreamIndex = av_find_best_stream(mFormatContext, AVMEDIA_TYPE_VIDEO, -1, -1,
+                                                const_cast<const AVCodec**>(&mHardwareCodec), 0);
 #else
-    mVideoStreamIndex =
-        av_find_best_stream(mFormatContext, AVMEDIA_TYPE_VIDEO, -1, -1, &mHardwareCodec, 0);
+        mVideoStreamIndex =
+            av_find_best_stream(mFormatContext, AVMEDIA_TYPE_VIDEO, -1, -1, &mHardwareCodec, 0);
 #endif
 
-    if (mVideoStreamIndex < 0) {
-        LOG(LogError) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                         "Couldn't retrieve video stream for file \""
-                      << mVideoPath << "\"";
-        avformat_close_input(&mFormatContext);
-        avformat_free_context(mFormatContext);
-        return false;
-    }
+        if (mVideoStreamIndex < 0) {
+            LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                             "Couldn't retrieve video stream for file \""
+                          << mVideoPath << "\"";
+            avformat_close_input(&mFormatContext);
+            avformat_free_context(mFormatContext);
+            return;
+        }
 
-    mVideoStream = mFormatContext->streams[mVideoStreamIndex];
-    mVideoWidth = mFormatContext->streams[mVideoStreamIndex]->codecpar->width;
-    mVideoHeight = mFormatContext->streams[mVideoStreamIndex]->codecpar->height;
+        mVideoStream = mFormatContext->streams[mVideoStreamIndex];
+        mVideoWidth = mFormatContext->streams[mVideoStreamIndex]->codecpar->width;
+        mVideoHeight = mFormatContext->streams[mVideoStreamIndex]->codecpar->height;
 
-    LOG(LogDebug) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
+        LOG(LogDebug) << "VideoFFmpegComponent::startVideoStream(): "
 #if defined(_WIN64)
-                  << "Playing video \"" << Utils::String::replace(mVideoPath, "/", "\\")
-                  << "\" (codec: "
+                      << "Playing video \"" << Utils::String::replace(mVideoPath, "/", "\\")
+                      << "\" (codec: "
 #else
-                  << "Playing video \"" << mVideoPath << "\" (codec: "
+                      << "Playing video \"" << mVideoPath << "\" (codec: "
 #endif
-                  << avcodec_get_name(
-                         mFormatContext->streams[mVideoStreamIndex]->codecpar->codec_id)
-                  << ", decoder: " << (hwDecoding ? "hardware" : "software") << ")";
+                      << avcodec_get_name(
+                             mFormatContext->streams[mVideoStreamIndex]->codecpar->codec_id)
+                      << ", decoder: " << (hwDecoding ? "hardware" : "software") << ")";
 
-    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): stream found, about to init decoder "
-                     "(hwDecoding="
-                  << (hwDecoding ? "true" : "false") << ")";
-            Log::flush();
+        if (hwDecoding)
+            mSWDecoder = decoderInitHW();
+        else
+            mSWDecoder = true;
 
-    if (hwDecoding)
-        mSWDecoder = decoderInitHW();
-    else
-        mSWDecoder = true;
+        if (mSWDecoder) {
+            // The hardware decoder initialization failed, which can happen for a number of reasons.
+            if (hwDecoding) {
+                LOG(LogDebug)
+                    << "VideoFFmpegComponent::startVideoStream(): Hardware decoding failed, "
+                       "falling back to software decoder";
+            }
 
-    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): decoder init done, mSWDecoder="
-                  << (mSWDecoder ? "true" : "false");
-            Log::flush();
+            mVideoCodec =
+                const_cast<AVCodec*>(avcodec_find_decoder(mVideoStream->codecpar->codec_id));
 
-    if (mSWDecoder) {
-        // The hardware decoder initialization failed, which can happen for a number of reasons.
-        if (hwDecoding) {
-            LOG(LogDebug)
-                << "VideoFFmpegComponent::finishVideoStreamSetup(): Hardware decoding failed, "
-                   "falling back to software decoder";
-        }
+            if (!mVideoCodec) {
+                LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                                 "Couldn't find a suitable video codec for file \""
+                              << mVideoPath << "\"";
+                return;
+            }
 
-        mVideoCodec =
-            const_cast<AVCodec*>(avcodec_find_decoder(mVideoStream->codecpar->codec_id));
+            mVideoCodecContext = avcodec_alloc_context3(mVideoCodec);
 
-        if (!mVideoCodec) {
-            LOG(LogError) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                             "Couldn't find a suitable video codec for file \""
-                          << mVideoPath << "\"";
-            return false;
-        }
-
-        mVideoCodecContext = avcodec_alloc_context3(mVideoCodec);
-
-        if (!mVideoCodecContext) {
-            LOG(LogError) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                             "Couldn't allocate video codec context for file \""
-                          << mVideoPath << "\"";
-            return false;
-        }
+            if (!mVideoCodecContext) {
+                LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                                 "Couldn't allocate video codec context for file \""
+                              << mVideoPath << "\"";
+                return;
+            }
 
 #if LIBAVUTIL_VERSION_MAJOR < 58
-        if (mVideoCodec->capabilities & AV_CODEC_CAP_TRUNCATED)
-            mVideoCodecContext->flags |= AV_CODEC_FLAG_TRUNCATED;
+            if (mVideoCodec->capabilities & AV_CODEC_CAP_TRUNCATED)
+                mVideoCodecContext->flags |= AV_CODEC_FLAG_TRUNCATED;
 #endif
 
-        if (avcodec_parameters_to_context(mVideoCodecContext, mVideoStream->codecpar)) {
-            LOG(LogError) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                             "Couldn't fill the video codec context parameters for file \""
-                          << mVideoPath << "\"";
-            return false;
-        }
-
-        if (avcodec_open2(mVideoCodecContext, mVideoCodec, nullptr)) {
-            LOG(LogError) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                             "Couldn't initialize the video codec context for file \""
-                          << mVideoPath << "\"";
-            return false;
-        }
-    }
-    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): video codec setup OK";
-            Log::flush();
-
-    // Audio stream setup, optional as some videos do not have any audio tracks.
-    // Audio can also be disabled per video via the theme configuration.
-
-    if (mPlayAudio) {
-        mAudioStreamIndex =
-            av_find_best_stream(mFormatContext, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-
-        if (mAudioStreamIndex < 0) {
-            LOG(LogDebug) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                             "File does not seem to contain any audio streams";
-        }
-
-        if (mAudioStreamIndex >= 0) {
-            mAudioStream = mFormatContext->streams[mAudioStreamIndex];
-            mAudioCodec =
-                const_cast<AVCodec*>(avcodec_find_decoder(mAudioStream->codecpar->codec_id));
-
-            if (!mAudioCodec) {
-                LOG(LogError) << "Couldn't find a suitable audio codec for file \""
+            if (avcodec_parameters_to_context(mVideoCodecContext, mVideoStream->codecpar)) {
+                LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                                 "Couldn't fill the video codec context parameters for file \""
                               << mVideoPath << "\"";
-                return false;
+                return;
             }
 
-            mAudioCodecContext = avcodec_alloc_context3(mAudioCodec);
+            if (avcodec_open2(mVideoCodecContext, mVideoCodec, nullptr)) {
+                LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                                 "Couldn't initialize the video codec context for file \""
+                              << mVideoPath << "\"";
+                return;
+            }
+        }
+
+        // Audio stream setup, optional as some videos do not have any audio tracks.
+        // Audio can also be disabled per video via the theme configuration.
+
+        if (mPlayAudio) {
+            mAudioStreamIndex =
+                av_find_best_stream(mFormatContext, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+
+            if (mAudioStreamIndex < 0) {
+                LOG(LogDebug) << "VideoFFmpegComponent::startVideoStream(): "
+                                 "File does not seem to contain any audio streams";
+            }
+
+            if (mAudioStreamIndex >= 0) {
+                mAudioStream = mFormatContext->streams[mAudioStreamIndex];
+                mAudioCodec =
+                    const_cast<AVCodec*>(avcodec_find_decoder(mAudioStream->codecpar->codec_id));
+
+                if (!mAudioCodec) {
+                    LOG(LogError) << "Couldn't find a suitable audio codec for file \""
+                                  << mVideoPath << "\"";
+                    return;
+                }
+
+                mAudioCodecContext = avcodec_alloc_context3(mAudioCodec);
 
 #if LIBAVUTIL_VERSION_MAJOR < 58
-            if (mAudioCodec->capabilities & AV_CODEC_CAP_TRUNCATED)
-                mAudioCodecContext->flags |= AV_CODEC_FLAG_TRUNCATED;
+                if (mAudioCodec->capabilities & AV_CODEC_CAP_TRUNCATED)
+                    mAudioCodecContext->flags |= AV_CODEC_FLAG_TRUNCATED;
 #endif
 
-            // Some formats want separate stream headers.
-            if (mAudioCodecContext->flags & AVFMT_GLOBALHEADER)
-                mAudioCodecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+                // Some formats want separate stream headers.
+                if (mAudioCodecContext->flags & AVFMT_GLOBALHEADER)
+                    mAudioCodecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-            if (avcodec_parameters_to_context(mAudioCodecContext, mAudioStream->codecpar)) {
-                LOG(LogError) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                                 "Couldn't fill the audio codec context parameters for file \""
-                              << mVideoPath << "\"";
-                return false;
-            }
+                if (avcodec_parameters_to_context(mAudioCodecContext, mAudioStream->codecpar)) {
+                    LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                                     "Couldn't fill the audio codec context parameters for file \""
+                                  << mVideoPath << "\"";
+                    return;
+                }
 
-            if (avcodec_open2(mAudioCodecContext, mAudioCodec, nullptr)) {
-                LOG(LogError) << "VideoFFmpegComponent::finishVideoStreamSetup(): "
-                                 "Couldn't initialize the audio codec context for file \""
-                              << mVideoPath << "\"";
-                return false;
+                if (avcodec_open2(mAudioCodecContext, mAudioCodec, nullptr)) {
+                    LOG(LogError) << "VideoFFmpegComponent::startVideoStream(): "
+                                     "Couldn't initialize the audio codec context for file \""
+                                  << mVideoPath << "\"";
+                    return;
+                }
             }
         }
+
+        mVideoTimeBase = 1.0l / av_q2d(mVideoStream->avg_frame_rate);
+
+        // Set some reasonable target queue sizes (buffers).
+        mVideoTargetQueueSize = static_cast<int>(av_q2d(mVideoStream->avg_frame_rate) / 2.0l);
+        if (mAudioStreamIndex >= 0)
+            mAudioTargetQueueSize = mAudioStream->codecpar->CHANNELS * 15;
+        else
+            mAudioTargetQueueSize = 30;
+
+        mPacket = av_packet_alloc();
+        mVideoFrame = av_frame_alloc();
+        mVideoFrameResampled = av_frame_alloc();
+        mAudioFrame = av_frame_alloc();
+        mAudioFrameResampled = av_frame_alloc();
+
+        // Resize the video surface, which is needed both for the gamelist view and for
+        // the video screeensaver.
+        resize();
+
+        calculateBlackFrame();
+
+        mFadeIn = 0.0f;
     }
-
-    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): audio setup OK, mAudioStreamIndex="
-                  << mAudioStreamIndex;
-            Log::flush();
-
-    mVideoTimeBase = 1.0l / av_q2d(mVideoStream->avg_frame_rate);
-
-    // Set some reasonable target queue sizes (buffers).
-    mVideoTargetQueueSize = static_cast<int>(av_q2d(mVideoStream->avg_frame_rate) / 2.0l);
-    if (mAudioStreamIndex >= 0)
-        mAudioTargetQueueSize = mAudioStream->codecpar->CHANNELS * 15;
-    else
-        mAudioTargetQueueSize = 30;
-
-    mPacket = av_packet_alloc();
-    mVideoFrame = av_frame_alloc();
-    mVideoFrameResampled = av_frame_alloc();
-    mAudioFrame = av_frame_alloc();
-    mAudioFrameResampled = av_frame_alloc();
-
-    LOG(LogDebug) << "DIAG finishVideoStreamSetup(): EXIT (success)";
-            Log::flush();
-    return true;
 }
 
 void VideoFFmpegComponent::stopVideoPlayer(bool muteAudio)
 {
-    LOG(LogDebug) << "DIAG stopVideoPlayer(): CALLED, this=" << static_cast<void*>(this)
-                  << " mVideoPath=\"" << mVideoPath
-                  << "\" mFormatContext=" << static_cast<void*>(mFormatContext)
-                  << " mStreamSetupThread=" << static_cast<void*>(mStreamSetupThread.get());
-    Log::flush();
-
     if (muteAudio)
         muteVideoPlayer();
-
-    // Custom patch: if a background setup thread (see setupVideoStream()) is still running
-    // for a previous video selection, it must be joined here, before anything below touches
-    // mFormatContext or the codec contexts it may still be writing to. This is always safe
-    // to call (join() on a thread that has already finished returns immediately), and every
-    // call site that selects a new video already calls stopVideoPlayer() before changing
-    // mVideoPath, so this never blocks waiting on a video other than the one being abandoned.
-    if (mStreamSetupThread) {
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): joining in-flight setup thread for \""
-                      << mVideoPath << "\"";
-            Log::flush();
-        mStreamSetupThread->join();
-        mStreamSetupThread.reset();
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): joined OK";
-            Log::flush();
-    }
-    mStreamSetupComplete = false;
-    mStreamSetupFailed = false;
-    mStreamReady = false;
 
     mIsPlaying = false;
     mIsActuallyPlaying = false;
@@ -1853,60 +1686,17 @@ void VideoFFmpegComponent::stopVideoPlayer(bool muteAudio)
         AudioManager::getInstance().clearStream();
 
     if (mFormatContext) {
-        // Custom patch (perf diag): mFormatContext non-null no longer implies the codec/frame/
-        // packet resources below were actually allocated - see mStreamReady's declaration in
-        // the header. If stopVideoPlayer() is called after setupVideoStream() has opened the
-        // file but before finishVideoStreamSetup() has run, mVideoFrame/mPacket/mHwContext/etc.
-        // are still whatever they were reset to (should be nullptr), while mFormatContext is
-        // already valid. Log each pointer and bracket each free call so that if this still
-        // crashes, the log pinpoints the exact call and pointer state.
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown ENTER mVideoFrame="
-                      << static_cast<void*>(mVideoFrame) << " mVideoFrameResampled="
-                      << static_cast<void*>(mVideoFrameResampled)
-                      << " mAudioFrame=" << static_cast<void*>(mAudioFrame)
-                      << " mAudioFrameResampled=" << static_cast<void*>(mAudioFrameResampled)
-                      << " mPacket=" << static_cast<void*>(mPacket)
-                      << " mHwContext=" << static_cast<void*>(mHwContext)
-                      << " mVideoCodecContext=" << static_cast<void*>(mVideoCodecContext)
-                      << " mAudioCodecContext=" << static_cast<void*>(mAudioCodecContext)
-                      << " mFormatContext=" << static_cast<void*>(mFormatContext);
-        Log::flush();
         av_frame_free(&mVideoFrame);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mVideoFrame) OK";
-        Log::flush();
         av_frame_free(&mVideoFrameResampled);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mVideoFrameResampled) OK";
-        Log::flush();
         av_frame_free(&mAudioFrame);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mAudioFrame) OK";
-        Log::flush();
         av_frame_free(&mAudioFrameResampled);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_frame_free(mAudioFrameResampled) OK";
-        Log::flush();
-        if (mPacket)
-            av_packet_unref(mPacket);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_packet_unref OK";
-        Log::flush();
+        av_packet_unref(mPacket);
         av_packet_free(&mPacket);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_packet_free OK";
-        Log::flush();
         av_buffer_unref(&mHwContext);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown av_buffer_unref OK";
-        Log::flush();
         avcodec_free_context(&mVideoCodecContext);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avcodec_free_context(video) OK";
-        Log::flush();
         avcodec_free_context(&mAudioCodecContext);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avcodec_free_context(audio) OK";
-        Log::flush();
         avformat_close_input(&mFormatContext);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avformat_close_input OK, mFormatContext now="
-                      << static_cast<void*>(mFormatContext);
-        Log::flush();
-        if (mFormatContext)
-            avformat_free_context(mFormatContext);
-        LOG(LogDebug) << "DIAG stopVideoPlayer(): teardown avformat_free_context OK";
-        Log::flush();
+        avformat_free_context(mFormatContext);
         mVideoCodecContext = nullptr;
         mAudioCodecContext = nullptr;
         mFormatContext = nullptr;
