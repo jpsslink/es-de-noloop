@@ -1433,6 +1433,13 @@ bool VideoFFmpegComponent::decoderInitHW()
 
 void VideoFFmpegComponent::startVideoStream()
 {
+    LOG(LogDebug) << "DIAG startVideoStream(): CALLED, this=" << static_cast<void*>(this)
+                  << " mVideoPath=\"" << mVideoPath << "\" mVisible="
+                  << (mVisible ? "true" : "false") << " mThemeOpacity=" << mThemeOpacity
+                  << " mFormatContext=" << static_cast<void*>(mFormatContext)
+                  << " mStreamSetupThread=" << static_cast<void*>(mStreamSetupThread.get());
+    Log::flush();
+
     if (!mVisible || mThemeOpacity == 0.0f)
         return;
 
@@ -1764,6 +1771,12 @@ bool VideoFFmpegComponent::finishVideoStreamSetup()
 
 void VideoFFmpegComponent::stopVideoPlayer(bool muteAudio)
 {
+    LOG(LogDebug) << "DIAG stopVideoPlayer(): CALLED, this=" << static_cast<void*>(this)
+                  << " mVideoPath=\"" << mVideoPath
+                  << "\" mFormatContext=" << static_cast<void*>(mFormatContext)
+                  << " mStreamSetupThread=" << static_cast<void*>(mStreamSetupThread.get());
+    Log::flush();
+
     if (muteAudio)
         muteVideoPlayer();
 
